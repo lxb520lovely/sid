@@ -1,0 +1,10 @@
+numpy
+python-docx
+pillow
+matplotlib
+seaborn
+scikit-learn
+scipy
+pandas
+joblib
+threadpoolctl

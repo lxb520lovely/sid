@@ -1,0 +1,37 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+.cache/
+.env
+
+# Large local data and generated SID artifacts.
+*.npy
+*.npz
+logs/
+rqkmeans_sid_out*/
+rqopq_sid_out*/
+multimodal_rqopq_sample_*/
+multimodal_rqopq_full_*/
+
+# Office/editor temporary lock files.
+.~*
+~$*
+
+# Local debug outputs created by VSCode launch/tasks.
+rqopq_sid_out_debug/
+rqkmeans_sid_out_debug/
+rqopq_sid_out/eval_debug/
+multimodal_rqopq_smoke/
+multimodal_rqopq_smoke_random/
+multimodal_rqopq_smoke_semantic/
+multimodal_rqopq_sid_out/
+multimodal_rqopq_sid_out_random/
+multimodal_rqopq_sid_out_semantic/
+
+# Internal DOCX render scratch directory.
+sid_docx_render/
+*_render/
+
+# Codex/manual artifact preview workspaces. Keep exported root artifacts instead.
+outputs/manual-*/

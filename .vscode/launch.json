@@ -1,0 +1,118 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+        "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+        "LOKY_MAX_CPU_COUNT": "8"
+      }
+    },
+    {
+      "name": "Build RQ-OPQ SID (default)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/build_rqopq_sid.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--input",
+        "shopee_tittle_emb.npy",
+        "--output-dir",
+        "rqopq_sid_out_debug",
+        "--code-dim",
+        "32",
+        "--rq-clusters",
+        "512",
+        "--rq-levels",
+        "3",
+        "--opq-subspaces",
+        "2",
+        "--opq-clusters",
+        "256"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+        "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+        "LOKY_MAX_CPU_COUNT": "8"
+      }
+    },
+    {
+      "name": "Evaluate SID Quality",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/evaluate_sid_quality.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--input",
+        "shopee_tittle_emb.npy",
+        "--sid-dir",
+        "rqopq_sid_out",
+        "--output-dir",
+        "rqopq_sid_out/eval_debug",
+        "--max-scatter-points",
+        "1500"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+        "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+        "LOKY_MAX_CPU_COUNT": "8"
+      }
+    },
+    {
+      "name": "Build RQ-KMeans SID",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/build_rqkmeans_sid.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--input",
+        "shopee_tittle_emb.npy",
+        "--output-dir",
+        "rqkmeans_sid_out_debug",
+        "--clusters",
+        "512",
+        "--levels",
+        "4",
+        "--code-dim",
+        "32"
+      ],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+        "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+        "LOKY_MAX_CPU_COUNT": "8"
+      }
+    },
+    {
+      "name": "Create DOCX Report",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/create_sid_report_docx.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}",
+        "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+        "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+        "LOKY_MAX_CPU_COUNT": "8"
+      }
+    }
+  ]
+}

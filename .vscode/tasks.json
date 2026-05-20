@@ -1,0 +1,81 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build RQ-OPQ SID",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "build_rqopq_sid.py",
+        "--input",
+        "shopee_tittle_emb.npy",
+        "--output-dir",
+        "rqopq_sid_out_debug",
+        "--code-dim",
+        "32",
+        "--rq-clusters",
+        "512",
+        "--rq-levels",
+        "3",
+        "--opq-subspaces",
+        "2",
+        "--opq-clusters",
+        "256"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+          "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+          "LOKY_MAX_CPU_COUNT": "8"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Evaluate SID Quality",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "evaluate_sid_quality.py",
+        "--input",
+        "shopee_tittle_emb.npy",
+        "--sid-dir",
+        "rqopq_sid_out",
+        "--output-dir",
+        "rqopq_sid_out/eval_debug",
+        "--max-scatter-points",
+        "1500"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+          "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+          "LOKY_MAX_CPU_COUNT": "8"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Create DOCX Report",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "create_sid_report_docx.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+          "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+          "LOKY_MAX_CPU_COUNT": "8"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}

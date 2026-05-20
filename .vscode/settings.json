@@ -1,0 +1,20 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": false,
+  "python.envFile": "${workspaceFolder}/.env",
+  "terminal.integrated.env.osx": {
+    "PYTHONPATH": "${workspaceFolder}",
+    "MPLCONFIGDIR": "${workspaceFolder}/.cache/matplotlib",
+    "PIP_CACHE_DIR": "${workspaceFolder}/.cache/pip",
+    "LOKY_MAX_CPU_COUNT": "8"
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    ".cache": true
+  },
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  "python-envs.defaultEnvManager": "ms-python.python:system"
+}
