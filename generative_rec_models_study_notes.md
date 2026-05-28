@@ -8,11 +8,6 @@
 - RankMixer
 - UniRec
 
-阅读方式建议：
-
-1. 先看每节的“模型定位”，知道它在推荐链路里解决什么问题。
-2. 再看“模型结构”，对照论文图理解模块关系。
-3. 最后看“输入输出 + 数据流”，把它讲成一条完整 pipeline。
 
 ---
 
@@ -221,254 +216,6 @@ Item 64 → Sem.ID = (5, 25, 55)
 - 如果多个 item 共享同一个 Semantic ID，需要额外 disambiguation。
 - 生成式 beam search 的线上成本需要考虑。
 
----
-
-## 2. HSTU / Generative Recommenders
-
-HSTU 来自 Meta 的 **Generative Recommenders** 工作。它和 TIGER 的侧重点不同。
-
-TIGER 重点是：
-
-```text
-如何生成 item Semantic ID
-```
-
-HSTU 重点是：
-
-```text
-如何把工业推荐数据建模成可扩展的用户行为序列
-```
-
-也就是说，HSTU 更像一个推荐系统里的 **sequence backbone**。
-
----
-
-### 2.1 HSTU 图一：从 DLRM 到 Generative Recommender
-
-![HSTU 数据形态变化](hstu1.png)
-
-### 2.2 模型定位
-
-传统 DLRM 更像是：
-
-```text
-numerical features
-categorical features
-user/item/context features
-        ↓
-feature interaction network
-        ↓
-prediction head
-```
-
-HSTU / Generative Recommenders 想把推荐数据改写成：
-
-```text
-用户行为流
-    ↓
-序列化统一特征
-    ↓
-causal sequence modeling
-    ↓
-预测未来 action / item / target
-```
-
-所以它不是单纯做 next item ID generation，而是把用户在平台上的行为建模成一个时间序列。
-
-### 2.3 图一怎么讲
-
-图左边是传统 DLRM 的处理方式。
-
-```text
-Numerical features
-Categorical features
-        ↓
-在不同时间点分别建模
-        ↓
-特征交互网络
-        ↓
-训练样本 / prediction target
-```
-
-图右边是 Generative Recommenders 的处理方式。
-
-```text
-main time series
-auxiliary time series 1
-auxiliary time series 2
-        ↓
-merge & sequentialize
-        ↓
-causal-masked learned features
-        ↓
-target-aware cross attention
-        ↓
-emit example
-```
-
-重点是：  
-HSTU 把原来散落在 feature table 里的特征，变成了一个 **sequentialized + model-based unified feature**。
-
-### 2.4 输入输出
-
-输入：
-
-```text
-用户行为序列:
-(action_type, item_id, timestamp, surface, context, features)
-```
-
-比如：
-
-```text
-t1: view item A on feed
-t2: like item B
-t3: skip item C
-t4: click item D
-```
-
-输出：
-
-```text
-未来行为预测
-未来 item 预测
-多任务目标预测
-```
-
-它可以服务于：
-
-- candidate generation
-- ranking feature
-- multi-task prediction
-- user state modeling
-
-### 2.5 图一数据流
-
-```text
-Raw user events
-        ↓
-Numerical / categorical / contextual features
-        ↓
-Merge and sequentialize
-        ↓
-Main time series + auxiliary time series
-        ↓
-Causal-masked learned features
-        ↓
-Target-aware cross attention
-        ↓
-Emit training examples / future targets
-```
-
----
-
-### 2.6 HSTU 图二：HSTU Block / Backbone
-
-![HSTU Block](hstu2.png)
-
-### 2.7 模型结构
-
-图二右边是 HSTU 的主干结构。
-
-它的输入是：
-
-```text
-Sequentialized Unified Features
-```
-
-先经过：
-
-```text
-Preprocessing
-```
-
-然后进入多层 HSTU-like block。
-
-从图里可以看到每层包含：
-
-```text
-U, Q, K, V = φ1(f1(X))
-        ↓
-A(X) = φ2(QK^T + relative bias)
-        ↓
-Norm(A(X)V(X) ⊙ U(X))
-        ↓
-Y(X) = f2(...)
-```
-
-你汇报时不需要展开公式细节，可以解释成：
-
-```text
-输入序列 X
-    ↓
-生成 query/key/value/update 表示
-    ↓
-做时间序列上的交互
-    ↓
-用 U(X) 做 gating/update
-    ↓
-输出新的序列表示 Y(X)
-```
-
-### 2.8 HSTU 输入输出
-
-输入：
-
-```text
-serialized unified features
-```
-
-也就是用户行为、item、上下文、时间等组成的序列。
-
-中间输出：
-
-```text
-每个时间步的 hidden state
-```
-
-最终输出：
-
-```text
-top prediction heads
-```
-
-可以用于预测未来行为、点击、观看时长、互动等。
-
-### 2.9 HSTU 数据流
-
-```text
-Raw recommendation logs
-        ↓
-Feature extraction
-        ↓
-Feature sequentialization
-        ↓
-Serialized unified features
-        ↓
-Preprocessing
-        ↓
-HSTU layers
-        ↓
-Sequence hidden states
-        ↓
-Prediction heads
-        ↓
-Future action / recommendation target
-```
-
-### 2.10 HSTU 关键点
-
-- HSTU 的核心不是 SID，而是 **用户行为序列建模**。
-- 它把推荐系统从 feature interaction pipeline 推向 sequence modeling pipeline。
-- 输入是行为流，不是单个 user-item pair。
-- 它更接近推荐系统里的 foundation backbone。
-
-### 2.11 HSTU 局限
-
-- 系统复杂度和训练成本高。
-- 对数据组织方式要求高，需要把多源行为和特征统一成序列。
-- 不像 TIGER / OneRec 那样直观地产生 item Semantic ID。
-- 更偏工业大规模 backbone，不容易小规模复现。
 
 ---
 
@@ -1385,9 +1132,683 @@ DPO loss
 
 ---
 
-## 6. 五个模型的横向理解
+## 6. GenRec: Preference-Oriented Generative Retrieval
 
-### 6.1 它们分别改写推荐链路的哪里
+论文链接：[GenRec: A Preference-Oriented Generative Framework for Large-Scale Recommendation](https://arxiv.org/abs/2604.14878)
+
+![GenRec 模型图](genrec.svg)
+
+### 6.1 模型定位
+
+GenRec 是 JD App 上线的工业级生成式推荐框架。它和 TIGER、OneRec 都很像，因为它们都基于：
+
+```text
+item → Semantic ID
+用户历史 → SID token sequence
+生成模型 → 生成目标 item / item list 的 SID
+```
+
+但 GenRec 的重点不是重新提出 Semantic ID，而是解决 **generative retrieval 在工业线上落地时的三个问题**：
+
+```text
+1. Page-wise NTP:
+   分页请求下，同一个用户历史可能对应多个正反馈 item。
+
+2. Token Merger:
+   用户历史很长，而每个 item 又是多 token SID，prefill 成本高。
+
+3. GRPO-SR:
+   生成模型需要对齐用户偏好，但普通 RL 容易 reward hacking。
+```
+
+一句话：
+
+> GenRec = decoder-only generative retrieval + Page-wise NTP + prompt-side Token Merger + GRPO-SR preference alignment。
+
+它更像 TIGER 的工业增强版：仍然偏 **召回 / retrieval**，但训练目标、输入压缩和偏好对齐都更贴近线上生产系统。
+
+### 6.2 模型结构
+
+GenRec 使用 **decoder-only Transformer**，而不是 TIGER 那种 encoder-decoder。
+
+整体结构可以拆成三块：
+
+```text
+User history prompt
+        ↓
+Token Merger 压缩 prompt 里的 item SID
+        ↓
+Decoder Layers
+        ↓
+LM Head
+        ↓
+Generate predicted item SID sequence
+```
+
+论文图里的关键点是：
+
+```text
+输入侧:
+item_1 = [s1, s2, s3]
+item_2 = [s1, s2, s3]
+
+经过 Merger:
+[s1, s2, s3] → compressed item vector
+
+Decoder 输入:
+compressed item_1, <sep>, compressed item_2, ...
+
+输出侧:
+不压缩，仍然生成完整 SID token:
+predicted item_1: [s1, s2, s3]
+<sep>
+predicted item_2: [s1, s2, s3]
+```
+
+所以 GenRec 是一种 **asymmetric representation architecture**：
+
+```text
+prompt / prefill side:
+多 token SID 被压缩
+
+training / decoding side:
+不压缩，仍然保持完整 Semantic ID token
+```
+
+这样既减少了用户历史输入长度，又保留了生成 item SID 时的细粒度能力。
+
+### 6.3 输入输出
+
+输入是用户历史行为序列：
+
+```text
+H = {v_1, v_2, ..., v_n}
+```
+
+其中每个 item 都被映射成 Semantic ID：
+
+```text
+SID(v_i) = {s_i^1, s_i^2, s_i^3}
+```
+
+因此用户历史 prompt 可以写成：
+
+```text
+S_u = [SID(v_1), <sep>, SID(v_2), <sep>, ..., SID(v_n)]
+```
+
+训练阶段输出是 page-wise target：
+
+```text
+Y_page = [SID(v) : v ∈ O ∪ C ∪ E]
+```
+
+其中：
+
+```text
+O = ordered items
+C = clicked items
+E = exposed items
+```
+
+并且这些 item 会按交互强度排序。
+
+推理阶段输出是：
+
+```text
+beam search 生成多个 candidate item SID
+        ↓
+SID 映射回真实 item
+        ↓
+召回候选
+```
+
+所以 GenRec 有一个很重要的不对称：
+
+```text
+训练:
+page-wise list target
+
+推理:
+point-wise beam search candidates
+```
+
+### 6.4 对着图怎么讲
+
+可以按图从左下到右上讲：
+
+第一步，看输入：
+
+```text
+item_1 的 SID tokens
+<sep>
+item_2 的 SID tokens
+...
+```
+
+每个 item 原本有多个 SID token。
+
+第二步，看 Merger：
+
+```text
+item 的多个 SID embedding
+        ↓
+concat
+        ↓
+linear projection
+        ↓
+compressed item vector
+```
+
+也就是图里的：
+
+```text
+compressed item_1
+<sep>
+compressed item_2
+```
+
+第三步，看 Decoder Layers：
+
+```text
+compressed prompt
+        ↓
+decoder-only Transformer
+        ↓
+LM Head
+```
+
+第四步，看输出：
+
+```text
+predicted item_1 <sep> predicted item_2 ...
+```
+
+输出侧不使用 compressed item，而是完整生成每个 item 的 SID token。
+
+第五步，看虚线框：
+
+```text
+No Compressed Items for Training & Decoding
+```
+
+这句话非常关键，表示：
+
+> 压缩只发生在 prompt/prefill 侧，训练 target 和 decoder 生成侧仍然是完整 SID token。
+
+---
+
+### 6.5 重点一：Page-wise NTP
+
+#### 6.5.1 它解决什么问题
+
+普通 generative retrieval 通常是 point-wise NTP：
+
+```text
+Input:
+用户历史 H
+
+Target:
+下一个 item 的 SID
+```
+
+也就是：
+
+```text
+H → item_a
+```
+
+但工业推荐经常是分页请求。用户看到的是一页商品/内容，而不是一个单点 item。
+
+在同一个 page request 里，用户可能：
+
+```text
+点击 item_1
+购买 item_2
+曝光 item_3
+点击 item_4
+```
+
+于是会出现：
+
+```text
+同一个用户历史 H
+    → item_1 是合理 label
+    → item_2 也是合理 label
+    → item_4 也是合理 label
+```
+
+如果还是 point-wise 训练，就会得到多个样本：
+
+```text
+H → item_1
+H → item_2
+H → item_4
+```
+
+这会导致 **one-to-many ambiguity**：  
+同一个输入 prefix 对应多个互相竞争的输出，模型被迫把概率分散到多个 item 上。
+
+#### 6.5.2 GenRec 怎么做
+
+GenRec 把 target 从单个 item 改成整页交互 item 序列：
+
+```text
+Input:
+用户历史 H
+
+Target:
+Y_page = [ordered items, clicked items, exposed items]
+```
+
+也就是：
+
+```text
+H → item_1, item_2, item_4, ...
+```
+
+训练目标仍然是 autoregressive next-token prediction：
+
+```text
+L_SFT = - Σ_t log Pθ(y_t | S_u, y_<t)
+```
+
+区别在于：
+
+```text
+y_t 来自整页 target sequence
+而不是单个 next item
+```
+
+#### 6.5.3 为什么有用
+
+Page-wise NTP 的好处是：
+
+```text
+1. 解决同一个输入对应多个正反馈 item 的冲突
+2. 一个 forward pass 里监督多个 item，梯度更密集
+3. 保留 page 内部多个 item 的相对关系
+4. 更贴近工业分页推荐场景
+```
+
+和 OneRec 的关系：
+
+```text
+OneRec:
+生成 high-value session，偏端到端 session recommendation。
+
+GenRec:
+训练时生成 page-wise target，但推理仍保持 point-wise beam search，
+更方便接入现有 retrieval pipeline。
+```
+
+---
+
+### 6.6 重点二：Token Merger
+
+#### 6.6.1 它解决什么问题
+
+SID 的优点是 item 可生成、可泛化，但缺点是：
+
+```text
+一个 item 不再是一个 token
+而是多个 token
+```
+
+比如：
+
+```text
+item_i → [s_i^1, s_i^2, s_i^3]
+```
+
+如果用户历史有 100 个 item：
+
+```text
+原始 item 序列长度:
+100
+
+SID token 序列长度:
+300 + separators
+```
+
+这会显著增加 decoder-only Transformer 的 prefill 成本。
+
+#### 6.6.2 GenRec 怎么做
+
+GenRec 在 prompt side 引入 **linear Token Merger**。
+
+对于一个 item 的三个 SID token embedding：
+
+```text
+e(s_i^1), e(s_i^2), e(s_i^3)
+```
+
+先 concat：
+
+```text
+Concat(e(s_i^1), e(s_i^2), e(s_i^3))
+```
+
+再过一个 linear layer：
+
+```text
+h_{v_i} = Linear(Concat(e(s_i^1), e(s_i^2), e(s_i^3)))
+```
+
+于是：
+
+```text
+[s_i^1, s_i^2, s_i^3]
+        ↓
+compressed item_i
+```
+
+图里就是：
+
+```text
+item_1 的多个圆点 token
+        ↓
+Merger
+        ↓
+compressed item_1
+```
+
+#### 6.6.3 为什么叫 asymmetric
+
+因为它只压缩输入 prompt，不压缩输出。
+
+```text
+Prompt / prefill:
+[s1, s2, s3] → compressed item vector
+
+Training target / decoding:
+仍然生成 [s1, s2, s3]
+```
+
+这点非常重要。
+
+如果输出也压缩成一个 vector，模型就没法用 LM Head 按 SID token 自回归生成 item 了。  
+GenRec 保持输出侧 full-resolution decoding，保证生成结果还是合法的 SID token sequence。
+
+#### 6.6.4 为什么有用
+
+Token Merger 的价值：
+
+```text
+1. 降低 prompt length
+2. 降低 prefill latency
+3. 允许使用更长用户历史
+4. 仍然保留输出侧细粒度 SID generation
+```
+
+你可以把它理解成：
+
+> 输入侧为了效率，把历史 item 的 SID 压成一个 item-level latent token；输出侧为了可生成性，仍然逐个 SID token 解码。
+
+---
+
+### 6.7 重点三：GRPO-SR Preference Alignment
+
+#### 6.7.1 它解决什么问题
+
+Page-wise NTP 只是监督学习。
+
+它学到的是：
+
+```text
+历史日志里用户点过/买过/曝光过什么
+```
+
+但线上推荐还需要优化用户满意度，比如：
+
+```text
+点击
+购买
+长期偏好
+相关性
+不被 reward hacking 诱导
+```
+
+如果直接用 RL 优化 reward，又可能出现一个问题：
+
+```text
+模型生成语法合法的 SID
+但这些 SID 对用户并不相关
+却骗过了 reward model
+```
+
+这就是 reward hacking。
+
+#### 6.7.2 GenRec 怎么做
+
+GenRec 提出 **GRPO-SR**：
+
+```text
+Group Relative Policy Optimization
+        +
+Supervised Regularization
+```
+
+流程：
+
+```text
+User prompt S_u
+        ↓
+当前 policy 生成一组候选 item
+        ↓
+Reward model 给每个候选打分
+        ↓
+组内相对比较，计算 advantage
+        ↓
+GRPO 更新 policy
+        ↓
+NLL regularization 拉住真实用户正反馈轨迹
+```
+
+这里的 “group relative” 意思是：  
+不是看单个候选的绝对 reward，而是在同一组候选里做相对比较。
+
+#### 6.7.3 Hybrid Reward
+
+GenRec 的 reward 不是单一 reward model 分数，而是：
+
+```text
+hybrid reward = relevance gate × dense preference reward
+```
+
+dense preference reward：
+
+```text
+用 reward model 估计用户对候选 item 的偏好分数
+```
+
+relevance gate：
+
+```text
+判断候选 item 是否和用户语义相关
+不相关则 reward 置低或置零
+```
+
+这样可以缓解：
+
+```text
+生成合法但无关 SID 组合
+却获得较高 reward
+```
+
+#### 6.7.4 NLL regularization
+
+GRPO-SR 还加了 NLL regularization。
+
+原因是：  
+纯 RL 容易把模型推离真实用户行为分布。
+
+NLL regularization 的作用是：
+
+```text
+让模型在优化 reward 的同时
+仍然保持对真实正反馈 item 的生成概率
+```
+
+可以理解为：
+
+```text
+GRPO:
+往 reward 更高的方向推
+
+NLL regularization:
+别偏离真实用户行为太远
+```
+
+#### 6.7.5 为什么有用
+
+GRPO-SR 的价值：
+
+```text
+1. 比纯 SFT 更直接优化用户偏好
+2. 组内相对 reward 比绝对 reward 更稳定
+3. relevance gate 缓解 reward hacking
+4. NLL regularization 保持真实行为分布
+```
+
+和 OneRec 的 DPO/IPA 类似，GenRec 也在做生成式推荐的偏好对齐。  
+区别是：
+
+```text
+OneRec:
+用 reward model 选择 chosen/rejected，再 DPO 训练 session generator。
+
+GenRec:
+用 GRPO-SR 在 point-wise rollout 候选上做 group-relative policy optimization，
+并用 NLL regularization 稳住真实正反馈。
+```
+
+---
+
+### 6.8 完整数据流
+
+离线 item 表示：
+
+```text
+Item image / text
+        ↓
+Multimodal encoder
+        ↓
+Recommendation-oriented embedding
+        ↓
+RQ K-means
+        ↓
+SID(v) = [s1, s2, s3]
+```
+
+Page-wise SFT：
+
+```text
+User history H
+        ↓
+Convert each item to SID triplet
+        ↓
+Prompt-side Token Merger
+        ↓
+Decoder-only Transformer
+        ↓
+Generate Y_page
+        ↓
+Page-wise NTP loss
+```
+
+Preference alignment：
+
+```text
+User prompt S_u
+        ↓
+Generate rollout candidates
+        ↓
+Dense reward model
+        ↓
+Relevance gate
+        ↓
+Hybrid reward
+        ↓
+GRPO update
+        ↓
+NLL regularization
+```
+
+Online serving：
+
+```text
+User history
+        ↓
+SID prompt + Token Merger
+        ↓
+Decoder-only Transformer
+        ↓
+Point-wise beam search
+        ↓
+Candidate SID
+        ↓
+Map SID to item
+        ↓
+Retrieval candidates
+```
+
+### 6.9 和 TIGER / OneRec / UniRec 的区别
+
+和 TIGER：
+
+```text
+TIGER:
+encoder-decoder，point-wise next item SID generation。
+
+GenRec:
+decoder-only，page-wise NTP 训练，Token Merger 压缩长历史，
+再用 GRPO-SR 做偏好对齐。
+```
+
+和 OneRec：
+
+```text
+OneRec:
+目标是生成 high-value session，更像端到端 session generator。
+
+GenRec:
+训练时用 page-wise target，但线上仍保持 point-wise beam search，
+更像工业 generative retrieval 框架。
+```
+
+和 UniRec：
+
+```text
+UniRec:
+核心是 Chain-of-Attribute，先生成 category/seller/brand 等属性，再生成 SID。
+
+GenRec:
+核心不是 attribute chain，而是 page-wise supervision、Token Merger 和 GRPO-SR。
+```
+
+### 6.10 关键点
+
+- GenRec 仍然是 generative retrieval，不是完整排序模型。
+- 使用 decoder-only Transformer，方便复用 LLM 推理优化。
+- Page-wise NTP 解决分页请求下的一对多 label ambiguity。
+- Token Merger 只压缩 prompt side，不压缩 decoding side。
+- GRPO-SR 用 group-relative RL 做偏好对齐。
+- Hybrid reward 用 dense reward + relevance gate 缓解 reward hacking。
+
+### 6.11 局限
+
+- 仍然依赖 Semantic ID 质量。
+- Page-wise target 的构造依赖具体分页机制和日志定义。
+- Reward model / relevance gate 的质量会影响 RL 对齐结果。
+- 虽然 Token Merger 降低了 prefill 成本，但 beam search 仍有线上开销。
+- 更偏 JD 电商场景，迁移到短视频/内容流需要重新设计 page-wise target。
+
+---
+
+## 7. 六个模型的横向理解
+
+### 7.1 它们分别改写推荐链路的哪里
 
 ```text
 TIGER
@@ -1404,9 +1825,12 @@ RankMixer
 
 UniRec
     改写 generative ranking / retrieval 表达：先生成 attributes，再生成 SID。
+
+GenRec
+    改写工业 generative retrieval 训练与对齐：Page-wise NTP、Token Merger、GRPO-SR。
 ```
 
-### 6.2 重点对比
+### 7.2 重点对比
 
 | 模型 | 核心结构 | 输入 | 输出 | 主要作用 |
 |---|---|---|---|---|
@@ -1415,8 +1839,9 @@ UniRec
 | OneRec | Encoder-Decoder + MoE + DPO | 用户行为序列 | high-value session SID | 端到端生成推荐 |
 | RankMixer | Token Mixing + Per-token FFN | ranking feature tokens | ranking scores | 排序特征交互 |
 | UniRec | CoA + Gated-CrossAttn + RFT/DPO | 用户序列 + SID 序列 | attributes + SID | 补足生成式推荐表达 |
+| GenRec | Decoder-only + Page-wise NTP + Token Merger + GRPO-SR | 用户历史 SID prompt | page-wise target / beam candidates | 工业生成式召回与偏好对齐 |
 
-### 6.3 推荐学习顺序
+### 7.3 推荐学习顺序
 
 建议按这个顺序学：
 
@@ -1435,49 +1860,8 @@ UniRec
 
 5. RankMixer
    看 ranking stage 如何大模型化和高效做 feature interaction。
+
+6. GenRec
+   看工业 generative retrieval 如何处理分页、一对多 label、长历史输入和 RL 偏好对齐。
 ```
-
----
-
-## 7. 复习提纲
-
-如果要向 mentor 汇报，可以按下面这套问题准备。
-
-### TIGER
-
-- 为什么不用原始 item ID，而要用 Semantic ID？
-- Semantic ID 是怎么从 content embedding 量化来的？
-- Encoder 输入是什么？
-- Decoder 输出是什么？
-- 生成的 Semantic ID 怎么映射回 item？
-
-### HSTU
-
-- 传统 DLRM 的 feature table 和 GR 的 sequentialized feature 有什么区别？
-- HSTU 输入为什么是用户行为流？
-- HSTU block 里 U/Q/K/V 和 gating 起什么作用？
-- HSTU 为什么更像 backbone，而不是 tokenizer？
-
-### OneRec
-
-- OneRec 为什么说是 session-wise generation？
-- Encoder 和 Decoder 分别处理什么？
-- Cross-attention 连接了什么？
-- MoE Layer 的作用是什么？
-- IPA / DPO 怎么对齐推荐 session？
-
-### RankMixer
-
-- 为什么 ranking 特征要 tokenization？
-- Token Mixing 替代了什么？
-- Per-token FFN 为什么适合推荐异质特征？
-- RankMixer 和生成式召回模型有什么区别？
-
-### UniRec
-
-- 生成式推荐为什么会有 item-side feature 表达缺口？
-- Chain-of-Attribute 是什么？
-- Capacity-constrained SID 解决什么问题？
-- Gated-CrossAttn 的输入输出是什么？
-- RFT 和 DPO 分别在对齐什么？
 

@@ -4,11 +4,11 @@
 Baseline 4 input:
   title_emb.npy  -> dense title embedding, shape (N, 256)
   image_emb.npy  -> dense image embedding, shape (N, 256)
-  item_feat.npz  -> itemid, cat_ids, flags, labels
+  item_feat.npz  -> itemid, cat_ids
   itemid.npy     -> raw item-id mapping for each row
 
 The script builds a continuous multi-modal item representation with:
-  L2(title) + L2(image) + discrete feature embeddings + flags
+  L2(title) + L2(image) + concatenated per-field cat_id embeddings
 
 Discrete feature embeddings can be:
   random        -> deterministic random projection baseline
@@ -36,9 +36,14 @@ from sklearn.decomposition import IncrementalPCA
 
 
 EPS = 1e-12
+DEFAULT_TITLE_WEIGHT = 1.0
+DEFAULT_IMAGE_WEIGHT = 1.0
+DEFAULT_CAT_WEIGHT = 0.20
 
 
+# CLI options for inputs, feature fusion, quantization, and artifact writing.
 def parse_args() -> argparse.Namespace:
+    
     parser = argparse.ArgumentParser(description="Build multi-modal RQ-OPQ SID.")
     parser.add_argument("--title-emb", type=Path, default=Path("title_emb.npy"))
     parser.add_argument("--image-emb", type=Path, default=Path("image_emb.npy"))
@@ -52,31 +57,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opq-subspaces", type=int, default=2)
     parser.add_argument("--opq-clusters", type=int, default=256)
 
-    parser.add_argument("--cat-emb-dim", type=int, default=32)
-    parser.add_argument("--label-emb-dim", type=int, default=32)
+    parser.add_argument(
+        "--cat-fields",
+        type=int,
+        default=4,
+        help="Use the first N columns from item_feat.npz:cat_ids.",
+    )
+    parser.add_argument(
+        "--cat-emb-dim",
+        type=int,
+        default=16,
+        help="Embedding dimension per cat_id field.",
+    )
     parser.add_argument(
         "--discrete-embedding-mode",
         choices=("semantic_mean", "random"),
-        default="semantic_mean",
-        help="How to map cat_ids/labels to dense vectors.",
+        default="random",
+        help="How to map cat_ids to dense vectors.",
     )
-    parser.add_argument("--title-weight", type=float, default=1.0)
-    parser.add_argument("--image-weight", type=float, default=1.0)
-    parser.add_argument("--cat-weight", type=float, default=0.5)
-    parser.add_argument("--label-weight", type=float, default=0.5)
-    parser.add_argument("--flag-weight", type=float, default=0.2)
-    parser.add_argument(
-        "--drop-constant-flags",
-        action="store_true",
-        default=True,
-        help="Drop flag columns whose sampled/full min=max. Enabled by default.",
-    )
-    parser.add_argument(
-        "--keep-constant-flags",
-        action="store_false",
-        dest="drop_constant_flags",
-        help="Keep all flag columns.",
-    )
+    parser.add_argument("--title-weight", type=float, default=DEFAULT_TITLE_WEIGHT)
+    parser.add_argument("--image-weight", type=float, default=DEFAULT_IMAGE_WEIGHT)
+    parser.add_argument("--cat-weight", type=float, default=DEFAULT_CAT_WEIGHT)
 
     parser.add_argument("--chunk-size", type=int, default=65536)
     parser.add_argument("--ipca-epochs", type=int, default=1)
@@ -109,20 +110,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Lightweight helpers used by all streaming stages.
 def log(msg: str) -> None:
+    """Print progress immediately so long streaming jobs expose live status."""
     print(msg, flush=True)
 
 
 def iter_ranges(n: int, chunk_size: int) -> Iterator[tuple[int, int]]:
+    """Yield half-open row ranges used to scan large arrays in fixed-size chunks."""
     for start in range(0, n, chunk_size):
         yield start, min(start + chunk_size, n)
 
 
 def l2_normalize(x: np.ndarray) -> np.ndarray:
+    """Normalize each row to unit length while avoiding division by zero."""
     return x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), EPS)
 
 
 def entropy_from_counts(counts: np.ndarray) -> float:
+    """Compute Shannon entropy of non-empty cluster counts for usage balance metrics."""
     positive = counts[counts > 0].astype(np.float64)
     if positive.size == 0:
         return 0.0
@@ -131,13 +137,21 @@ def entropy_from_counts(counts: np.ndarray) -> float:
 
 
 def make_random_table(vocab_size: int, dim: int, rng: np.random.Generator) -> np.ndarray:
+    """Create reproducible random embeddings for categorical ids.
+
+    This is a simple non-semantic baseline for mapping discrete cat_ids into
+    dense vectors before feature fusion.
+    """
     table = rng.normal(0.0, 1.0 / math.sqrt(max(dim, 1)), size=(vocab_size, dim))
     table[0] *= 0.5
     return table.astype(np.float32)
 
 
 def resize_dim(x: np.ndarray, dim: int) -> np.ndarray:
-    """Deterministically resize feature dimension by truncating or zero-padding."""
+    """Resize feature vectors by truncating extra dimensions or padding zeros.
+
+    The operation is deterministic and keeps the first dimensions unchanged.
+    """
     if x.shape[1] == dim:
         return x.astype(np.float32, copy=False)
     if x.shape[1] > dim:
@@ -148,7 +162,11 @@ def resize_dim(x: np.ndarray, dim: int) -> np.ndarray:
 
 
 def semantic_base_chunk(title: np.ndarray, image: np.ndarray, start: int, end: int) -> np.ndarray:
-    """Base semantic vector used to aggregate discrete cat/label embeddings."""
+    """Build semantic base vectors for one item chunk.
+
+    Each row is the average of L2-normalized title and image embeddings. These
+    vectors are later averaged by cat_id in semantic_mean mode.
+    """
     title_norm = l2_normalize(np.asarray(title[start:end], dtype=np.float32))
     image_norm = l2_normalize(np.asarray(image[start:end], dtype=np.float32))
     return ((title_norm + image_norm) * 0.5).astype(np.float32)
@@ -157,15 +175,18 @@ def semantic_base_chunk(title: np.ndarray, image: np.ndarray, start: int, end: i
 def build_semantic_mean_tables(
     title: np.ndarray,
     image: np.ndarray,
-    feat: np.lib.npyio.NpzFile,
+    cat_ids: np.ndarray,
     n: int,
     cat_vocab_sizes: np.ndarray,
-    label_vocab_size: int,
     cat_emb_dim: int,
-    label_emb_dim: int,
     chunk_size: int,
-) -> tuple[list[np.ndarray], np.ndarray, dict[str, Any]]:
-    """Aggregate title/image semantic base vectors into cat/label tables."""
+) -> tuple[list[np.ndarray], dict[str, Any]]:
+    """Build semantic_mean embedding tables for categorical fields.
+
+    For each categorical field and each cat_id, the table stores the mean
+    title/image semantic vector of items carrying that id. Unseen ids fall back
+    to the global semantic mean, then vectors are normalized and resized.
+    """
     base_dim = title.shape[1]
     cat_sums = [
         np.zeros((int(vocab), base_dim), dtype=np.float64)
@@ -174,27 +195,20 @@ def build_semantic_mean_tables(
     cat_counts = [
         np.zeros(int(vocab), dtype=np.int64) for vocab in cat_vocab_sizes.tolist()
     ]
-    label_sum = np.zeros((label_vocab_size, base_dim), dtype=np.float64)
-    label_count = np.zeros(label_vocab_size, dtype=np.int64)
     global_sum = np.zeros(base_dim, dtype=np.float64)
     global_count = 0
 
     for start, end in iter_ranges(n, chunk_size):
         base = semantic_base_chunk(title, image, start, end)
-        cat_ids = np.asarray(feat["cat_ids"][start:end], dtype=np.int64)
-        labels = np.asarray(feat["labels"][start:end], dtype=np.int64)
+        cat_chunk = np.asarray(cat_ids[start:end], dtype=np.int64)
         global_sum += base.sum(axis=0, dtype=np.float64)
         global_count += end - start
-        for field_idx in range(cat_ids.shape[1]):
-            np.add.at(cat_sums[field_idx], cat_ids[:, field_idx], base)
+        for field_idx in range(cat_chunk.shape[1]):
+            np.add.at(cat_sums[field_idx], cat_chunk[:, field_idx], base)
             cat_counts[field_idx] += np.bincount(
-                cat_ids[:, field_idx], minlength=cat_counts[field_idx].shape[0]
+                cat_chunk[:, field_idx], minlength=cat_counts[field_idx].shape[0]
             )
-        flat_labels = labels.reshape(-1)
-        repeated_base = np.repeat(base, labels.shape[1], axis=0)
-        np.add.at(label_sum, flat_labels, repeated_base)
-        label_count += np.bincount(flat_labels, minlength=label_vocab_size)
-
+    
     global_mean = global_sum / max(global_count, 1)
     cat_tables: list[np.ndarray] = []
     cat_stats = []
@@ -217,25 +231,11 @@ def build_semantic_mean_tables(
             }
         )
 
-    label_seen = label_count > 0
-    label_means = np.empty_like(label_sum, dtype=np.float32)
-    label_means[label_seen] = (
-        label_sum[label_seen] / label_count[label_seen, None]
-    ).astype(np.float32)
-    label_means[~label_seen] = global_mean.astype(np.float32)
-    label_means = resize_dim(l2_normalize(label_means), label_emb_dim)
     stats = {
         "semantic_base_dim": int(base_dim),
         "cat_stats": cat_stats,
-        "label_stats": {
-            "vocab_size": int(label_vocab_size),
-            "seen": int(label_seen.sum()),
-            "unseen": int((~label_seen).sum()),
-            "min_count_seen": int(label_count[label_seen].min()) if label_seen.any() else 0,
-            "max_count": int(label_count.max()) if label_count.size else 0,
-        },
     }
-    return cat_tables, label_means.astype(np.float32), stats
+    return cat_tables, stats
 
 
 def validate_inputs(
@@ -244,6 +244,11 @@ def validate_inputs(
     itemid: np.ndarray,
     feat: np.lib.npyio.NpzFile,
 ) -> int:
+    """Validate that title, image, itemid, and item_feat rows describe the same items.
+
+    The pipeline assumes row i across all inputs belongs to the same item, so a
+    mismatch would corrupt the generated SID assignments.
+    """
     n = title.shape[0]
     if title.ndim != 2 or image.ndim != 2:
         raise ValueError("title/image embeddings must be 2-D")
@@ -255,80 +260,80 @@ def validate_inputs(
         raise ValueError("item_feat itemid row count does not match embeddings")
     if not np.array_equal(itemid[: min(n, 10000)], feat["itemid"][: min(n, 10000)]):
         raise ValueError("itemid.npy and item_feat.npz:itemid differ in first rows")
-    for key in ["cat_ids", "flags", "labels"]:
-        if feat[key].shape[0] != n:
-            raise ValueError(f"item_feat {key} row count does not match")
     return n
 
 
-def infer_active_flag_columns(flags: np.ndarray, n: int, chunk_size: int) -> list[int]:
-    mins = np.full(flags.shape[1], np.inf, dtype=np.float64)
-    maxs = np.full(flags.shape[1], -np.inf, dtype=np.float64)
-    for start, end in iter_ranges(n, chunk_size):
-        chunk = np.asarray(flags[start:end], dtype=np.float32)
-        mins = np.minimum(mins, chunk.min(axis=0))
-        maxs = np.maximum(maxs, chunk.max(axis=0))
-    return [i for i, (lo, hi) in enumerate(zip(mins, maxs)) if lo != hi]
-
-
 class FusionBuilder:
+    """Construct fused multi-modal feature chunks on demand.
+
+    The class keeps references to the source arrays and categorical embedding
+    tables, then produces weighted concatenated features for streaming PCA.
+    """
+
     def __init__(
         self,
         title: np.ndarray,
         image: np.ndarray,
-        feat: np.lib.npyio.NpzFile,
+        cat_ids: np.ndarray,
         cat_tables: list[np.ndarray],
-        label_table: np.ndarray,
-        active_flag_cols: list[int],
         weights: dict[str, float],
     ) -> None:
+        """Store source arrays, categorical tables, and modality weights."""
         self.title = title
         self.image = image
-        self.feat = feat
+        self.cat_ids = cat_ids
         self.cat_tables = cat_tables
-        self.label_table = label_table
-        self.active_flag_cols = active_flag_cols
         self.weights = weights
 
     @property
+    def cat_feature_dim(self) -> int:
+        """Total dense dimension contributed by all categorical fields."""
+        return sum(table.shape[1] for table in self.cat_tables)
+
+    @property
     def fused_dim(self) -> int:
+        """Total dimension before PCA: title + image + categorical embeddings."""
         return (
             self.title.shape[1]
             + self.image.shape[1]
-            + self.cat_tables[0].shape[1]
-            + self.label_table.shape[1]
-            + len(self.active_flag_cols)
+            + self.cat_feature_dim
         )
 
     def chunk(self, start: int, end: int) -> np.ndarray:
+        """Build one weighted fused feature chunk without materializing all rows.
+
+        Title and image vectors are L2-normalized per row. Categorical ids are
+        looked up in their per-field tables and concatenated, then all modalities
+        are scaled by their configured weights.
+        """
         title = l2_normalize(np.asarray(self.title[start:end], dtype=np.float32))
         image = l2_normalize(np.asarray(self.image[start:end], dtype=np.float32))
-        cat_ids = np.asarray(self.feat["cat_ids"][start:end], dtype=np.int64)
-        labels = np.asarray(self.feat["labels"][start:end], dtype=np.int64)
-        flags = np.asarray(self.feat["flags"][start:end], dtype=np.float32)
+        cat_ids = np.asarray(self.cat_ids[start:end], dtype=np.int64)
 
-        cat_emb = np.zeros((end - start, self.cat_tables[0].shape[1]), dtype=np.float32)
-        for field_idx, table in enumerate(self.cat_tables):
-            cat_emb += table[cat_ids[:, field_idx]]
-        cat_emb /= math.sqrt(len(self.cat_tables))
+        cat_emb = np.concatenate(
+            [
+                table[cat_ids[:, field_idx]]
+                for field_idx, table in enumerate(self.cat_tables)
+            ],
+            axis=1,
+        ).astype(np.float32, copy=False)
 
-        label_emb = self.label_table[labels].sum(axis=1).astype(np.float32)
-        label_emb /= math.sqrt(labels.shape[1])
-
-        active_flags = flags[:, self.active_flag_cols] if self.active_flag_cols else flags[:, :0]
         return np.concatenate(
             [
                 title * self.weights["title"],
                 image * self.weights["image"],
                 cat_emb * self.weights["cat"],
-                label_emb * self.weights["label"],
-                active_flags * self.weights["flag"],
             ],
             axis=1,
         ).astype(np.float32)
 
 
 def nearest_centers(x: np.ndarray, centers: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Assign each row to the nearest codebook center.
+
+    Returns both the integer labels and the corresponding squared L2 distances.
+    This is used after KMeans training to write SID codes and compute MSE.
+    """
     x2 = np.einsum("ij,ij->i", x, x, optimize=True)
     c2 = np.einsum("ij,ij->i", centers, centers, optimize=True)
     dist = x2[:, None] + c2[None, :] - 2.0 * (x @ centers.T)
@@ -345,6 +350,11 @@ def compute_rq_residual(
     start: int,
     end: int,
 ) -> np.ndarray:
+    """Compute the current RQ residual for a projected item chunk.
+
+    Starting from the PCA-projected vector, subtract each previously selected RQ
+    codeword so the next RQ level learns what earlier levels did not explain.
+    """
     residual = np.asarray(projected[start:end], dtype=np.float32).copy()
     for level, centers in enumerate(codebooks):
         residual -= centers[np.asarray(codes[start:end, level], dtype=np.int32)]
@@ -358,6 +368,11 @@ def fit_incremental_pca(
     chunk_size: int,
     epochs: int,
 ) -> IncrementalPCA:
+    """Fit IncrementalPCA over streamed fused features.
+
+    This reduces the high-dimensional multi-modal representation to code_dim
+    before quantization without loading the full fused matrix into memory.
+    """
     ipca = IncrementalPCA(n_components=code_dim)
     for epoch in range(epochs):
         log(f"Fitting IncrementalPCA epoch {epoch + 1}/{epochs}")
@@ -374,6 +389,10 @@ def transform_projected(
     code_dim: int,
     chunk_size: int,
 ) -> np.ndarray:
+    """Transform all fused features through PCA and save the projected memmap.
+
+    The returned array is backed by projected.npy and reused by RQ/OPQ stages.
+    """
     projected = np.lib.format.open_memmap(
         out_path, mode="w+", dtype=np.float32, shape=(n, code_dim)
     )
@@ -391,6 +410,11 @@ def fit_minibatch_kmeans(
     seed: int,
     name: str,
 ) -> MiniBatchKMeans:
+    """Train one MiniBatchKMeans codebook from a streaming data iterator.
+
+    The iterator is recreated each epoch so the codebook can make multiple
+    passes over residuals or subspace vectors.
+    """
     km = MiniBatchKMeans(
         n_clusters=n_clusters,
         batch_size=batch_size,
@@ -408,6 +432,11 @@ def fit_minibatch_kmeans(
 
 
 def summarize_counts(counts: np.ndarray) -> dict[str, Any]:
+    """Summarize how well a codebook is used.
+
+    The metrics include used code count, utilization ratio, entropy, and min/max
+    assigned cluster sizes.
+    """
     nonzero = counts[counts > 0]
     return {
         "used_codes": int(nonzero.size),
@@ -425,6 +454,11 @@ def make_offset_codes(
     rq_clusters: int,
     opq_clusters: int,
 ) -> np.ndarray:
+    """Convert local per-position codes into a single global token vocabulary.
+
+    RQ and OPQ positions can reuse local ids like 0 or 42, so each position gets
+    an offset to make its token ids distinct for downstream sequence models.
+    """
     offsets = []
     for level in range(codes.shape[1]):
         if level < rq_levels:
@@ -435,6 +469,11 @@ def make_offset_codes(
 
 
 def compute_collision_summary(codes: np.ndarray) -> dict[str, Any]:
+    """Compute exact collisions among full SID sequences.
+
+    A collision means two or more items share the same complete SID tuple. This
+    uses np.unique over all rows and can be memory-heavy on full datasets.
+    """
     contiguous = np.ascontiguousarray(codes)
     row_type = np.dtype((np.void, contiguous.dtype.itemsize * contiguous.shape[1]))
     rows = contiguous.view(row_type).reshape(-1)
@@ -458,6 +497,11 @@ def write_item_to_sid_head(
     offset_codes: np.ndarray,
     n_rows: int = 10000,
 ) -> None:
+    """Write a small human-readable item-to-SID preview CSV.
+
+    The preview contains raw local SID tokens, offset global tokens, and joined
+    string forms for the first n_rows items.
+    """
     n = min(n_rows, codes.shape[0])
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
@@ -484,6 +528,11 @@ def write_item_to_sid_full(
     offset_codes: np.ndarray,
     chunk_size: int,
 ) -> None:
+    """Write the full item-to-SID CSV in chunks.
+
+    This mirrors the preview format but emits every item, so it is optional for
+    large datasets.
+    """
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         header = ["row_id", "itemid"]
@@ -504,13 +553,16 @@ def write_item_to_sid_full(
 
 
 def main() -> None:
+    """Run the full SID build pipeline from raw multi-modal inputs to artifacts."""
     args = parse_args()
     start_time = time.time()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # OPQ splits the PCA space evenly across subspaces.
     if args.code_dim % args.opq_subspaces != 0:
         raise ValueError("--code-dim must be divisible by --opq-subspaces")
 
+    # Load large arrays with mmap so processing stays chunk-based.
     title = np.load(args.title_emb, mmap_mode="r", allow_pickle=False)
     image = np.load(args.image_emb, mmap_mode="r", allow_pickle=False)
     itemid = np.load(args.itemid, mmap_mode="r", allow_pickle=False)
@@ -521,57 +573,78 @@ def main() -> None:
     log(f"Rows: using {n:,} / {n_total:,}")
     log(f"Title shape: {title.shape}, image shape: {image.shape}")
 
-    cat_vocab_sizes = np.asarray(feat["cat_vocab_sizes"], dtype=np.int64)
-    label_vocab_size = int(feat["label_vocab_size"][0])
+    # Select and validate the categorical fields used in fusion.
+    if args.cat_fields <= 0:
+        raise ValueError("--cat-fields must be positive")
+    cat_ids_all = np.asarray(feat["cat_ids"], dtype=np.int64)
+    if cat_ids_all.ndim != 2:
+        raise ValueError("item_feat cat_ids must be 2-D")
+    if cat_ids_all.shape[0] != n_total:
+        raise ValueError("item_feat cat_ids row count does not match embeddings")
+    if args.cat_fields > cat_ids_all.shape[1]:
+        raise ValueError(
+            f"--cat-fields={args.cat_fields} exceeds cat_ids columns "
+            f"({cat_ids_all.shape[1]})"
+        )
+
+    raw_cat_vocab_sizes = np.asarray(feat["cat_vocab_sizes"], dtype=np.int64)
+    if args.cat_fields > raw_cat_vocab_sizes.shape[0]:
+        raise ValueError(
+            f"--cat-fields={args.cat_fields} exceeds cat_vocab_sizes length "
+            f"({raw_cat_vocab_sizes.shape[0]})"
+        )
+    cat_vocab_sizes = raw_cat_vocab_sizes[: args.cat_fields]
+    cat_field_indices = list(range(args.cat_fields))
+    cat_ids = np.ascontiguousarray(cat_ids_all[:n, : args.cat_fields])
+    del cat_ids_all
+    log(f"Using cat_id columns: {cat_field_indices}")
+
     rng = np.random.default_rng(args.seed)
     discrete_table_stats: dict[str, Any]
     if args.discrete_embedding_mode == "random":
-        log("Building random discrete embedding tables")
+        # Random mode is a reproducible categorical baseline.
+        log("Building random cat embedding tables")
         cat_tables = [
             make_random_table(int(vocab), args.cat_emb_dim, rng)
             for vocab in cat_vocab_sizes.tolist()
         ]
-        label_table = make_random_table(label_vocab_size, args.label_emb_dim, rng)
         discrete_table_stats = {"mode": "random"}
     else:
-        log("Building semantic_mean discrete embedding tables")
-        cat_tables, label_table, discrete_table_stats = build_semantic_mean_tables(
+        # Semantic mode averages title/image vectors for each categorical id.
+        log("Building semantic_mean cat embedding tables")
+        cat_tables, discrete_table_stats = build_semantic_mean_tables(
             title=title,
             image=image,
-            feat=feat,
+            cat_ids=cat_ids,
             n=n,
             cat_vocab_sizes=cat_vocab_sizes,
-            label_vocab_size=label_vocab_size,
             cat_emb_dim=args.cat_emb_dim,
-            label_emb_dim=args.label_emb_dim,
             chunk_size=args.chunk_size,
         )
         discrete_table_stats["mode"] = "semantic_mean"
-    active_flag_cols = (
-        infer_active_flag_columns(feat["flags"], n, args.chunk_size)
-        if args.drop_constant_flags
-        else list(range(feat["flags"].shape[1]))
-    )
-    log(f"Active flag columns: {active_flag_cols}")
 
     weights = {
         "title": args.title_weight,
         "image": args.image_weight,
         "cat": args.cat_weight,
-        "label": args.label_weight,
-        "flag": args.flag_weight,
     }
+    log(
+        "Modality weights: "
+        f"title={weights['title']:.8g}, "
+        f"image={weights['image']:.8g}, "
+        f"cat={weights['cat']:.8g}"
+    )
     fusion = FusionBuilder(
         title=title,
         image=image,
-        feat=feat,
+        cat_ids=cat_ids,
         cat_tables=cat_tables,
-        label_table=label_table,
-        active_flag_cols=active_flag_cols,
         weights=weights,
     )
+    log(f"Cat feature dim before PCA: {fusion.cat_feature_dim}")
     log(f"Fused feature dim before PCA: {fusion.fused_dim}")
 
+    # Reduce fused multi-modal vectors before quantization.
     ipca = fit_incremental_pca(
         fusion=fusion,
         n=n,
@@ -598,9 +671,11 @@ def main() -> None:
     rq_codebooks: list[np.ndarray] = []
     rq_metrics: list[dict[str, Any]] = []
     for level in range(args.rq_levels):
+        # RQ learns one codebook per residual level.
         log(f"Starting RQ level {level + 1}/{args.rq_levels}")
 
         def rq_train_iter(level=level):
+            """Stream residual vectors for the current RQ level."""
             for start, end in iter_ranges(n, args.chunk_size):
                 yield compute_rq_residual(projected, codes, rq_codebooks, start, end)
 
@@ -618,6 +693,7 @@ def main() -> None:
         counts = np.zeros(args.rq_clusters, dtype=np.int64)
         dist_sum = 0.0
         for start, end in iter_ranges(n, args.chunk_size):
+            # Assign current residuals to this level's nearest centers.
             residual = compute_rq_residual(projected, codes, rq_codebooks[:-1], start, end)
             labels, min_dist = nearest_centers(residual, centers)
             codes[start:end, level] = labels
@@ -645,12 +721,14 @@ def main() -> None:
     opq_metrics_history: list[dict[str, Any]] = []
 
     for outer in range(args.opq_outer_iter):
+        # OPQ alternates between subspace codebooks and rotation updates.
         log(f"Starting OPQ outer iteration {outer + 1}/{args.opq_outer_iter}")
         subspace_metrics = []
         for subspace in range(args.opq_subspaces):
             s0, s1 = subspace * subdim, (subspace + 1) * subdim
 
             def opq_train_iter(subspace=subspace, s0=s0, s1=s1):
+                """Stream one rotated residual subspace for OPQ codebook training."""
                 for start, end in iter_ranges(n, args.chunk_size):
                     residual = compute_rq_residual(projected, codes, rq_codebooks, start, end)
                     rotated = residual @ rotation
@@ -675,6 +753,7 @@ def main() -> None:
         original_mse_sum = 0.0
 
         for start, end in iter_ranges(n, args.chunk_size):
+            # Quantize the RQ residual inside each rotated subspace.
             residual = compute_rq_residual(projected, codes, rq_codebooks, start, end)
             rotated = residual @ rotation
             selected_rotated = np.empty_like(rotated, dtype=np.float32)
@@ -719,10 +798,12 @@ def main() -> None:
         )
 
         if outer < args.opq_outer_iter - 1:
+            # Orthogonal Procrustes update for the next OPQ iteration.
             u, _, vt = np.linalg.svd(cross, full_matrices=False)
             rotation = (u @ vt).astype(np.float32)
 
     codes.flush()
+    # Offset codes give each SID position its own token-id range.
     offset_codes = np.lib.format.open_memmap(
         args.output_dir / "sid_codes_offset.npy",
         mode="w+",
@@ -738,6 +819,7 @@ def main() -> None:
         )
     offset_codes.flush()
 
+    # Persist codebooks, projection, fusion metadata, and item ids.
     np.save(args.output_dir / "rq_codebooks.npy", np.stack(rq_codebooks).astype(np.float32))
     np.save(args.output_dir / "opq_codebooks.npy", opq_codebooks.astype(np.float32))
     np.save(args.output_dir / "opq_rotation.npy", rotation.astype(np.float32))
@@ -753,18 +835,19 @@ def main() -> None:
     np.savez_compressed(
         args.output_dir / "fusion_tables.npz",
         **{f"cat_table_{i}": table for i, table in enumerate(cat_tables)},
-        label_table=label_table,
-        active_flag_cols=np.asarray(active_flag_cols, dtype=np.int32),
+        cat_field_indices=np.asarray(cat_field_indices, dtype=np.int32),
         cat_vocab_sizes=cat_vocab_sizes.astype(np.int64),
-        label_vocab_size=np.asarray([label_vocab_size], dtype=np.int64),
+        cat_feature_dim=np.asarray([fusion.cat_feature_dim], dtype=np.int32),
         discrete_embedding_mode=np.asarray([args.discrete_embedding_mode]),
+        weight_names=np.asarray(["title", "image", "cat"]),
         weights=np.asarray(
-            [weights["title"], weights["image"], weights["cat"], weights["label"], weights["flag"]],
+            [weights["title"], weights["image"], weights["cat"]],
             dtype=np.float32,
         ),
     )
 
     if args.save_dense:
+        # Dense reconstruction artifacts are large and therefore optional.
         dense_dim = args.rq_levels * args.code_dim + args.opq_subspaces * subdim
         dense = np.lib.format.open_memmap(
             args.output_dir / "sid_codeword_concat.npy",
@@ -805,6 +888,7 @@ def main() -> None:
         offset_codes,
     )
     if args.write_full_csv:
+        # Full CSV is useful for inspection but expensive at full scale.
         write_item_to_sid_full(
             args.output_dir / "item_to_sid.csv",
             itemid,
@@ -813,6 +897,7 @@ def main() -> None:
             args.chunk_size,
         )
 
+    # Exact collision counting materializes all SID rows, so it is optional.
     collision_summary = (
         compute_collision_summary(np.asarray(codes)) if args.compute_collisions else None
     )
@@ -829,12 +914,12 @@ def main() -> None:
         "fusion": {
             "discrete_embedding_mode": args.discrete_embedding_mode,
             "fused_dim": int(fusion.fused_dim),
+            "cat_fields": int(args.cat_fields),
+            "cat_field_indices": cat_field_indices,
             "cat_emb_dim": args.cat_emb_dim,
-            "label_emb_dim": args.label_emb_dim,
-            "active_flag_cols": active_flag_cols,
+            "cat_feature_dim": int(fusion.cat_feature_dim),
             "weights": weights,
             "cat_vocab_sizes": cat_vocab_sizes.astype(int).tolist(),
-            "label_vocab_size": int(label_vocab_size),
             "discrete_table_stats": discrete_table_stats,
         },
         "pca": {

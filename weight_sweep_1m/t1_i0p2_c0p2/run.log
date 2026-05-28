@@ -1,0 +1,52 @@
+.venv/bin/python build_multimodal_rqopq_sid_modular.py --output-dir weight_sweep_1m/t1_i0p2_c0p2 --max-items 1000000 --title-weight 1.0 --image-weight 0.2 --cat-weight 0.2 --compute-collisions
+Rows: using 1,000,000 / 11,168,159
+Title shape: (11168159, 256), image shape: (11168159, 256)
+Using cat_id columns: [0, 1, 2, 3]
+Building random cat embedding tables
+Modality weights: title=1, image=0.2, cat=0.2
+Cat feature dim before PCA: 64
+Fused feature dim before PCA: 576
+Fitting IncrementalPCA epoch 1/1
+Starting RQ level 1/3
+Training RQ level 1 epoch 1/3
+Training RQ level 1 epoch 2/3
+Training RQ level 1 epoch 3/3
+RQ level 1: mse=0.07056273, used=512/512
+Starting RQ level 2/3
+Training RQ level 2 epoch 1/3
+Training RQ level 2 epoch 2/3
+Training RQ level 2 epoch 3/3
+RQ level 2: mse=0.04429135, used=512/512
+Starting RQ level 3/3
+Training RQ level 3 epoch 1/3
+Training RQ level 3 epoch 2/3
+Training RQ level 3 epoch 3/3
+RQ level 3: mse=0.03180045, used=512/512
+Starting OPQ outer iteration 1/3
+Training OPQ outer 1 subspace 1 epoch 1/3
+Training OPQ outer 1 subspace 1 epoch 2/3
+Training OPQ outer 1 subspace 1 epoch 3/3
+Training OPQ outer 1 subspace 2 epoch 1/3
+Training OPQ outer 1 subspace 2 epoch 2/3
+Training OPQ outer 1 subspace 2 epoch 3/3
+OPQ outer 1: rotated_mse=0.01901629, original_mse=0.01901629
+Starting OPQ outer iteration 2/3
+Training OPQ outer 2 subspace 1 epoch 1/3
+Training OPQ outer 2 subspace 1 epoch 2/3
+Training OPQ outer 2 subspace 1 epoch 3/3
+Training OPQ outer 2 subspace 2 epoch 1/3
+Training OPQ outer 2 subspace 2 epoch 2/3
+Training OPQ outer 2 subspace 2 epoch 3/3
+OPQ outer 2: rotated_mse=0.01901257, original_mse=0.01901257
+Starting OPQ outer iteration 3/3
+Training OPQ outer 3 subspace 1 epoch 1/3
+Training OPQ outer 3 subspace 1 epoch 2/3
+Training OPQ outer 3 subspace 1 epoch 3/3
+Training OPQ outer 3 subspace 2 epoch 1/3
+Training OPQ outer 3 subspace 2 epoch 2/3
+Training OPQ outer 3 subspace 2 epoch 3/3
+OPQ outer 3: rotated_mse=0.01900777, original_mse=0.01900777
+Done
+  sid_codes.npy: (1000000, 5)
+  output_dir: weight_sweep_1m/t1_i0p2_c0p2
+  elapsed_seconds: 175.9

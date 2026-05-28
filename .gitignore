@@ -8,6 +8,7 @@ __pycache__/
 # Large local data and generated SID artifacts.
 *.npy
 *.npz
+data/amazon_beauty*/
 logs/
 rqkmeans_sid_out*/
 rqopq_sid_out*/
